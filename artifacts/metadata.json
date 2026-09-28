@@ -1,0 +1,42 @@
+{
+  "features": [
+    "unit_mean",
+    "unit_sd",
+    "trend",
+    "year_squared",
+    "rainfall_mm",
+    "rain_z",
+    "rain_normal",
+    "tmax_c",
+    "tmin_c",
+    "irrigation_ratio",
+    "area"
+  ],
+  "scope_crops": [
+    "RICE",
+    "WHEAT",
+    "MAIZE",
+    "CHICKPEA",
+    "GROUNDNUT",
+    "SORGHUM"
+  ],
+  "trained_rows": 19949,
+  "validation": {
+    "split_year": 2010,
+    "r2": 0.738,
+    "mae": 0.426,
+    "per_crop_mae": {
+      "RICE": 0.382,
+      "WHEAT": 0.477,
+      "MAIZE": 0.611,
+      "CHICKPEA": 0.292,
+      "GROUNDNUT": 0.291,
+      "SORGHUM": 0.34
+    }
+  },
+  "data_years": [
+    1997,
+    2015
+  ],
+  "baseline_year": 2015
+}

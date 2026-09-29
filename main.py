@@ -1,10 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from typing import Literal
 import engine as E
 
-app = FastAPI(title="Crop Advisory API", version="1.0")
+app = FastAPI(title="Crop Advisory API", version="1.1")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -25,6 +26,11 @@ class CompareIn(BaseModel):
     district: str
     scenario: Scenario = 'normal'
     area_ha: float = Field(1.0, gt=0, le=10000)
+
+
+@app.get('/', include_in_schema=False)
+def root():
+    return RedirectResponse('/docs')
 
 
 @app.get('/health')
@@ -75,3 +81,12 @@ def compare(q: CompareIn):
     if df.empty:
         raise HTTPException(404, 'no crops on record for that district')
     return df.to_dict('records')
+
+
+@app.get('/history')
+def history(state: str, district: str, crop: str, season: str,
+            scenario: Scenario = 'normal'):
+    r = E.history(state, district, crop, season, scenario)
+    if 'error' in r:
+        raise HTTPException(404, r['error'])
+    return r

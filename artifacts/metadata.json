@@ -23,15 +23,15 @@
   "trained_rows": 19949,
   "validation": {
     "split_year": 2010,
-    "r2": 0.738,
-    "mae": 0.426,
+    "r2": 0.74,
+    "mae": 0.424,
     "per_crop_mae": {
-      "RICE": 0.382,
-      "WHEAT": 0.477,
+      "RICE": 0.375,
+      "WHEAT": 0.471,
       "MAIZE": 0.611,
-      "CHICKPEA": 0.292,
-      "GROUNDNUT": 0.291,
-      "SORGHUM": 0.34
+      "CHICKPEA": 0.288,
+      "GROUNDNUT": 0.296,
+      "SORGHUM": 0.344
     }
   },
   "data_years": [

@@ -33,8 +33,9 @@ PROVIDER = os.environ.get('LLM_PROVIDER', '').strip().lower()
 if PROVIDER not in ('groq', 'gemini'):
     PROVIDER = 'groq' if GROQ_KEY else ('gemini' if GEMINI_KEY else '')
 
-GROQ_MODEL = os.environ.get('GROQ_MODEL', 'llama-3.3-70b-versatile')
+GROQ_MODEL = os.environ.get('GROQ_MODEL', '').strip()   # blank = discover one
 GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
+GROQ_MODELS_URL = 'https://api.groq.com/openai/v1/models'
 
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash')
 GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent'
@@ -237,6 +238,20 @@ def available():
     return bool(PROVIDER) and bool(GROQ_KEY if PROVIDER == 'groq' else GEMINI_KEY)
 
 
+def active_model():
+    """The model in use, for the status endpoint. Never raises."""
+    if PROVIDER == 'gemini':
+        return GEMINI_MODEL
+    if PROVIDER != 'groq':
+        return None
+    if GROQ_MODEL:
+        return GROQ_MODEL
+    try:
+        return _groq_model()
+    except Exception:
+        return None
+
+
 def _friendly(code):
     if code in (401, 403):
         return ('The assistant is not authorised. The server key is missing, '
@@ -250,8 +265,52 @@ def _friendly(code):
     return 'The assistant could not answer that. Try again.'
 
 
+class _ModelMissing(Exception):
+    """The configured Groq model no longer exists."""
+
+
+# Model names get retired, so rather than pinning one that will break later the
+# server asks Groq what it currently serves and picks the strongest chat model.
+_PICKED = {'name': None}
+_SKIP = ('whisper', 'guard', 'tts', 'embed', 'vision', 'moderation')
+
+
+def _score_model(mid):
+    low, s = mid.lower(), 0
+    if 'llama' in low:      s += 5
+    if '70b' in low:        s += 4
+    elif '8b' in low:       s += 1
+    if 'versatile' in low:  s += 3
+    if 'instant' in low:    s += 2
+    if 'instruct' in low:   s += 1
+    return s
+
+
+def _groq_model():
+    if GROQ_MODEL:
+        return GROQ_MODEL
+    if _PICKED['name']:
+        return _PICKED['name']
+    r = requests.get(GROQ_MODELS_URL,
+                     headers={'Authorization': 'Bearer ' + GROQ_KEY}, timeout=20)
+    if r.status_code != 200:
+        logging.error('groq models %s: %s', r.status_code, r.text[:300])
+        raise RuntimeError(_friendly(r.status_code))
+    ids = [m.get('id', '') for m in (r.json().get('data') or [])]
+    usable = [i for i in ids if i and not any(b in i.lower() for b in _SKIP)]
+    if not usable:
+        raise RuntimeError('No usable language model is available on this account.')
+    usable.sort(key=_score_model, reverse=True)
+    _PICKED['name'] = usable[0]
+    logging.info('groq model chosen: %s (from %d available)', usable[0], len(ids))
+    return usable[0]
+
+
 def _post(url, **kw):
     r = requests.post(url, timeout=TIMEOUT, **kw)
+    if r.status_code == 404 and 'model_not_found' in r.text:
+        logging.warning('groq model gone: %s', r.text[:200])
+        raise _ModelMissing()
     if r.status_code != 200:
         # The upstream body can echo the API key back on auth errors, so it is
         # logged server-side only and never returned to the browser.
@@ -273,6 +332,21 @@ def _run_tool(name, args, state):
 
 
 # ------------------------------------------------------------------ Groq
+def _groq_post(payload):
+    """POST to Groq, re-picking the model once if the current one has gone."""
+    hdrs = {'Authorization': 'Bearer ' + GROQ_KEY, 'Content-Type': 'application/json'}
+    for attempt in (0, 1):
+        payload['model'] = _groq_model()
+        try:
+            return _post(GROQ_URL, headers=hdrs, json=payload)
+        except _ModelMissing:
+            if attempt or GROQ_MODEL:
+                raise RuntimeError('The configured language model is not available '
+                                   'on this account.')
+            _PICKED['name'] = None      # forget it and ask Groq again
+    raise RuntimeError('The assistant could not reach a language model.')
+
+
 def _reply_groq(message, history, state):
     msgs = [{'role': 'system', 'content': SYSTEM}]
     for turn in (history or [])[-8:]:
@@ -283,12 +357,9 @@ def _reply_groq(message, history, state):
     msgs.append({'role': 'user', 'content': str(message)[:2000]})
 
     for _ in range(MAX_TOOL_ROUNDS):
-        data = _post(GROQ_URL,
-                     headers={'Authorization': 'Bearer ' + GROQ_KEY,
-                              'Content-Type': 'application/json'},
-                     json={'model': GROQ_MODEL, 'messages': msgs,
-                           'tools': GROQ_TOOLS, 'tool_choice': 'auto',
-                           'temperature': 0.2, 'max_tokens': 800})
+        data = _groq_post({'messages': msgs, 'tools': GROQ_TOOLS,
+                           'tool_choice': 'auto', 'temperature': 0.2,
+                           'max_tokens': 800})
         choices = data.get('choices') or []
         if not choices:
             raise RuntimeError('The language model returned nothing.')

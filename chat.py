@@ -272,18 +272,40 @@ class _ModelMissing(Exception):
 # Model names get retired, so rather than pinning one that will break later the
 # server asks Groq what it currently serves and picks the strongest chat model.
 _PICKED = {'name': None}
-_SKIP = ('whisper', 'guard', 'tts', 'embed', 'vision', 'moderation')
+
+# Not general-purpose chat models: speech, safety classifiers, embeddings.
+_SKIP = ('whisper', 'guard', 'tts', 'stt', 'embed', 'moderation', 'prompt-guard',
+         'ocr', 'rerank', 'safety')
+
+# Model families that follow instructions and call tools well, best first.
+# Matching is on a substring of the model id, which is how Groq names them.
+_FAMILIES = ('llama-4', 'llama-3.3', 'llama-3.1', 'llama', 'qwen', 'gpt-oss',
+             'kimi', 'deepseek', 'mixtral', 'mistral', 'gemma')
+
+# Language-specialised models: usable, but a poor fit for English advisory text.
+_DEMOTE = ('allam', 'saba', 'arabic', 'hebrew')
 
 
 def _score_model(mid):
-    low, s = mid.lower(), 0
-    if 'llama' in low:      s += 5
-    if '70b' in low:        s += 4
-    elif '8b' in low:       s += 1
-    if 'versatile' in low:  s += 3
-    if 'instant' in low:    s += 2
-    if 'instruct' in low:   s += 1
-    return s
+    low = mid.lower()
+    score = 0
+    for i, fam in enumerate(_FAMILIES):
+        if fam in low:
+            score = (len(_FAMILIES) - i) * 10
+            break
+    if any(d in low for d in _DEMOTE):
+        score -= 100
+    if '70b' in low or '120b' in low or '90b' in low:
+        score += 5
+    elif '32b' in low or '17b' in low:
+        score += 3
+    if 'versatile' in low:
+        score += 2
+    if 'instruct' in low or 'instant' in low:
+        score += 1
+    if 'preview' in low or 'deprecated' in low:
+        score -= 3
+    return score
 
 
 def _groq_model():
@@ -301,9 +323,17 @@ def _groq_model():
     if not usable:
         raise RuntimeError('No usable language model is available on this account.')
     usable.sort(key=_score_model, reverse=True)
-    _PICKED['name'] = usable[0]
-    logging.info('groq model chosen: %s (from %d available)', usable[0], len(ids))
-    return usable[0]
+    best = usable[0]
+    # Logged in full so the catalogue this account actually offers is visible,
+    # and GROQ_MODEL can be pinned if the automatic choice is wrong.
+    logging.info('groq catalogue (%d): %s', len(ids), ', '.join(ids))
+    logging.info('groq ranked: %s', ', '.join(
+        '%s=%d' % (m, _score_model(m)) for m in usable[:8]))
+    if _score_model(best) <= 0:
+        logging.warning('groq: no preferred family matched; falling back to %s', best)
+    _PICKED['name'] = best
+    logging.info('groq model chosen: %s', best)
+    return best
 
 
 def _post(url, **kw):

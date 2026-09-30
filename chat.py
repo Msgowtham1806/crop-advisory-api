@@ -12,6 +12,7 @@ endpoint reports itself as unavailable and the website hides the assistant.
 """
 import os
 import json
+import logging
 import difflib
 import re
 import requests
@@ -224,8 +225,24 @@ def _call_gemini(contents):
     r = requests.post(URL.format(MODEL), params={'key': API_KEY},
                       json=body, timeout=TIMEOUT)
     if r.status_code != 200:
-        raise RuntimeError('Language model error %s: %s' % (r.status_code, r.text[:300]))
+        # The upstream body echoes the API key back on auth errors, so it is
+        # logged server-side only and never returned to the browser.
+        logging.error('Gemini %s: %s', r.status_code, r.text[:500])
+        raise RuntimeError(_friendly(r.status_code))
     return r.json()
+
+
+def _friendly(code):
+    if code in (401, 403):
+        return ('The assistant is not authorised. The server key is missing, '
+                'invalid or suspended.')
+    if code == 429:
+        return 'The assistant has hit its rate limit. Wait a minute and try again.'
+    if code in (400, 404):
+        return 'The assistant is misconfigured on the server.'
+    if code >= 500:
+        return 'The language model is unavailable right now. Try again shortly.'
+    return 'The assistant could not answer that. Try again.'
 
 
 def reply(message, history=None):

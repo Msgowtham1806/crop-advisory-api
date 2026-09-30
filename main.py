@@ -2,10 +2,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, List, Optional
 import engine as E
+import chat as C
 
-app = FastAPI(title="Crop Advisory API", version="1.1")
+app = FastAPI(title="Crop Advisory API", version="1.2")
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
 
@@ -28,6 +29,16 @@ class CompareIn(BaseModel):
     area_ha: float = Field(1.0, gt=0, le=10000)
 
 
+class ChatTurn(BaseModel):
+    role: Literal['user', 'assistant']
+    text: str = Field('', max_length=2000)
+
+
+class ChatIn(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+    history: List[ChatTurn] = Field(default_factory=list, max_length=12)
+
+
 @app.get('/', include_in_schema=False)
 def root():
     return RedirectResponse('/docs')
@@ -36,6 +47,7 @@ def root():
 @app.get('/health')
 def health():
     return {'status': 'ok',
+            'chat_enabled': C.available(),
             'districts': int(E.LOOKUP.district.nunique()),
             'combinations': int(len(E.LOOKUP)),
             'model_r2': E.META['validation']['r2'],
@@ -90,3 +102,26 @@ def history(state: str, district: str, crop: str, season: str,
     if 'error' in r:
         raise HTTPException(404, r['error'])
     return r
+
+
+@app.get('/chat/status')
+def chat_status():
+    """Whether the conversational assistant is configured on this server."""
+    return {'enabled': C.available()}
+
+
+@app.post('/chat')
+def chat(q: ChatIn):
+    """Natural-language front door to the same model the form uses.
+
+    The language model may only report figures returned by the tools it is
+    given, each of which runs against the trained model and the lookup table.
+    """
+    if not C.available():
+        raise HTTPException(503, 'The assistant is not configured on this server.')
+    try:
+        return C.reply(q.message, [t.model_dump() for t in q.history])
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    except Exception:
+        raise HTTPException(500, 'The assistant could not answer that. Try again.')

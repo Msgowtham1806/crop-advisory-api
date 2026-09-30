@@ -7,8 +7,15 @@ instruction that forbids stating any figure it did not receive from a tool.
 Every number that reaches the user therefore comes from the same XGBoost model
 and the same six datasets that the form-based interface uses.
 
-Set GEMINI_API_KEY in the environment to enable it. Without the key the
-endpoint reports itself as unavailable and the website hides the assistant.
+Two providers are supported and the transport is the only difference between
+them. Set ONE of these in the environment:
+
+    GROQ_API_KEY     free tier, OpenAI-compatible, tool calling
+    GEMINI_API_KEY   Google AI Studio
+
+If both are set, GROQ_API_KEY wins unless LLM_PROVIDER says otherwise. With
+neither, the endpoint reports itself unavailable and the website hides the
+assistant.
 """
 import os
 import json
@@ -19,9 +26,19 @@ import requests
 
 import engine as E
 
-API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
-MODEL = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash')
-URL = 'https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent'
+GROQ_KEY = os.environ.get('GROQ_API_KEY', '').strip()
+GEMINI_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
+
+PROVIDER = os.environ.get('LLM_PROVIDER', '').strip().lower()
+if PROVIDER not in ('groq', 'gemini'):
+    PROVIDER = 'groq' if GROQ_KEY else ('gemini' if GEMINI_KEY else '')
+
+GROQ_MODEL = os.environ.get('GROQ_MODEL', 'llama-3.3-70b-versatile')
+GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
+
+GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash')
+GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent'
+
 TIMEOUT = 45
 MAX_TOOL_ROUNDS = 5
 
@@ -60,7 +77,7 @@ with their units. Two or three short paragraphs at most — the website displays
 the full numbers as cards beside your reply, so do not list every figure. Never
 use markdown headers or bullet symbols; write prose."""
 
-TOOLS = [{"function_declarations": [
+TOOL_SCHEMA = [
     {"name": "list_districts",
      "description": "List every district on record for a state. Use this to check a district name or offer choices.",
      "parameters": {"type": "object", "properties": {
@@ -86,7 +103,10 @@ TOOLS = [{"function_declarations": [
          "state": {"type": "string"}, "district": {"type": "string"},
          "scenario": {"type": "string"}, "area_ha": {"type": "number"}},
          "required": ["state", "district"]}},
-]}]
+]
+
+GEMINI_TOOLS = [{"function_declarations": TOOL_SCHEMA}]
+GROQ_TOOLS = [{"type": "function", "function": t} for t in TOOL_SCHEMA]
 
 
 # ---------------------------------------------------------------- name matching
@@ -214,22 +234,7 @@ TOOL_FNS = {'list_districts': _t_list_districts, 'list_crops': _t_list_crops,
 
 # ---------------------------------------------------------------- the loop
 def available():
-    return bool(API_KEY)
-
-
-def _call_gemini(contents):
-    body = {'system_instruction': {'parts': [{'text': SYSTEM}]},
-            'contents': contents,
-            'tools': TOOLS,
-            'generationConfig': {'temperature': 0.2, 'maxOutputTokens': 800}}
-    r = requests.post(URL.format(MODEL), params={'key': API_KEY},
-                      json=body, timeout=TIMEOUT)
-    if r.status_code != 200:
-        # The upstream body echoes the API key back on auth errors, so it is
-        # logged server-side only and never returned to the browser.
-        logging.error('Gemini %s: %s', r.status_code, r.text[:500])
-        raise RuntimeError(_friendly(r.status_code))
-    return r.json()
+    return bool(PROVIDER) and bool(GROQ_KEY if PROVIDER == 'groq' else GEMINI_KEY)
 
 
 def _friendly(code):
@@ -245,11 +250,69 @@ def _friendly(code):
     return 'The assistant could not answer that. Try again.'
 
 
-def reply(message, history=None):
-    """Return {reply, advisory, compare, used_tools}. Raises RuntimeError on failure."""
-    if not API_KEY:
-        raise RuntimeError('The assistant is not configured on this server.')
+def _post(url, **kw):
+    r = requests.post(url, timeout=TIMEOUT, **kw)
+    if r.status_code != 200:
+        # The upstream body can echo the API key back on auth errors, so it is
+        # logged server-side only and never returned to the browser.
+        logging.error('%s %s: %s', PROVIDER, r.status_code, r.text[:500])
+        raise RuntimeError(_friendly(r.status_code))
+    return r.json()
 
+
+def _run_tool(name, args, state):
+    """Execute one tool and remember anything the website should display."""
+    fn = TOOL_FNS.get(name)
+    out = fn(args) if fn else {'error': 'unknown tool'}
+    state['used'].append(name)
+    if name == 'get_advisory' and 'error' not in out:
+        state['advisory'] = out
+    if name == 'compare_crops' and 'error' not in out:
+        state['compare'] = out.get('crops_ranked')
+    return out
+
+
+# ------------------------------------------------------------------ Groq
+def _reply_groq(message, history, state):
+    msgs = [{'role': 'system', 'content': SYSTEM}]
+    for turn in (history or [])[-8:]:
+        role = 'assistant' if turn.get('role') == 'assistant' else 'user'
+        text = str(turn.get('text') or '')[:2000]
+        if text:
+            msgs.append({'role': role, 'content': text})
+    msgs.append({'role': 'user', 'content': str(message)[:2000]})
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        data = _post(GROQ_URL,
+                     headers={'Authorization': 'Bearer ' + GROQ_KEY,
+                              'Content-Type': 'application/json'},
+                     json={'model': GROQ_MODEL, 'messages': msgs,
+                           'tools': GROQ_TOOLS, 'tool_choice': 'auto',
+                           'temperature': 0.2, 'max_tokens': 800})
+        choices = data.get('choices') or []
+        if not choices:
+            raise RuntimeError('The language model returned nothing.')
+        m = choices[0].get('message') or {}
+        calls = m.get('tool_calls') or []
+        if not calls:
+            return (m.get('content') or '').strip()
+
+        msgs.append({'role': 'assistant', 'content': m.get('content') or '',
+                     'tool_calls': calls})
+        for c in calls:
+            fn = c.get('function') or {}
+            try:
+                args = json.loads(fn.get('arguments') or '{}')
+            except ValueError:
+                args = {}
+            out = _run_tool(fn.get('name'), args, state)
+            msgs.append({'role': 'tool', 'tool_call_id': c.get('id'),
+                         'name': fn.get('name'), 'content': json.dumps(out)[:6000]})
+    return ''
+
+
+# ------------------------------------------------------------------ Gemini
+def _reply_gemini(message, history, state):
     contents = []
     for turn in (history or [])[-8:]:
         role = 'model' if turn.get('role') == 'assistant' else 'user'
@@ -258,36 +321,37 @@ def reply(message, history=None):
             contents.append({'role': role, 'parts': [{'text': text}]})
     contents.append({'role': 'user', 'parts': [{'text': str(message)[:2000]}]})
 
-    advisory, compare_rows, used = None, None, []
-
     for _ in range(MAX_TOOL_ROUNDS):
-        data = _call_gemini(contents)
+        data = _post(GEMINI_URL.format(GEMINI_MODEL), params={'key': GEMINI_KEY},
+                     json={'system_instruction': {'parts': [{'text': SYSTEM}]},
+                           'contents': contents, 'tools': GEMINI_TOOLS,
+                           'generationConfig': {'temperature': 0.2, 'maxOutputTokens': 800}})
         cands = data.get('candidates') or []
         if not cands:
             raise RuntimeError('The language model returned nothing.')
         parts = (cands[0].get('content') or {}).get('parts') or []
-
         calls = [p['functionCall'] for p in parts if 'functionCall' in p]
         if not calls:
-            text = ''.join(p.get('text', '') for p in parts).strip()
-            return {'reply': text or 'I could not put that into words. Try rephrasing.',
-                    'advisory': advisory, 'compare': compare_rows, 'used_tools': used}
+            return ''.join(p.get('text', '') for p in parts).strip()
 
         contents.append({'role': 'model', 'parts': [{'functionCall': c} for c in calls]})
         responses = []
         for c in calls:
             name = c.get('name')
-            args = c.get('args') or {}
-            used.append(name)
-            fn = TOOL_FNS.get(name)
-            out = fn(args) if fn else {'error': 'unknown tool'}
-            if name == 'get_advisory' and 'error' not in out:
-                advisory = out
-            if name == 'compare_crops' and 'error' not in out:
-                compare_rows = out.get('crops_ranked')
+            out = _run_tool(name, c.get('args') or {}, state)
             responses.append({'functionResponse': {'name': name, 'response': out}})
         contents.append({'role': 'user', 'parts': responses})
+    return ''
 
-    return {'reply': 'That needed more lookups than I am allowed in one turn. '
-                     'Ask me about one district and crop at a time.',
-            'advisory': advisory, 'compare': compare_rows, 'used_tools': used}
+
+def reply(message, history=None):
+    """Return {reply, advisory, compare, used_tools}. Raises RuntimeError on failure."""
+    if not available():
+        raise RuntimeError('The assistant is not configured on this server.')
+    state = {'advisory': None, 'compare': None, 'used': []}
+    text = (_reply_groq if PROVIDER == 'groq' else _reply_gemini)(message, history, state)
+    if not text:
+        text = ('That needed more lookups than I am allowed in one turn. Ask me '
+                'about one district and crop at a time.')
+    return {'reply': text, 'advisory': state['advisory'],
+            'compare': state['compare'], 'used_tools': state['used']}

@@ -107,7 +107,7 @@ def history(state: str, district: str, crop: str, season: str,
 @app.get('/chat/status')
 def chat_status():
     """Whether the conversational assistant is configured on this server."""
-    return {'enabled': C.available()}
+    return {'enabled': C.available(), 'provider': C.PROVIDER or None}
 
 
 @app.post('/chat')

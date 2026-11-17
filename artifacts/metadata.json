@@ -1,7 +1,13 @@
 {
+  "model_version": 2,
   "features": [
-    "unit_mean",
-    "unit_sd",
+    "p_mean",
+    "p_sd",
+    "p_n",
+    "p_recent",
+    "p_slope",
+    "p_gap",
+    "p_proj",
     "trend",
     "year_squared",
     "rainfall_mm",
@@ -10,7 +16,16 @@
     "tmax_c",
     "tmin_c",
     "irrigation_ratio",
-    "area"
+    "log_area",
+    "c_RICE",
+    "c_WHEAT",
+    "c_MAIZE",
+    "c_CHICKPEA",
+    "c_GROUNDNUT",
+    "c_SORGHUM",
+    "s_KHARIF",
+    "s_RABI",
+    "s_WHOLE YEAR"
   ],
   "scope_crops": [
     "RICE",
@@ -20,23 +35,45 @@
     "GROUNDNUT",
     "SORGHUM"
   ],
-  "trained_rows": 19949,
-  "validation": {
-    "split_year": 2010,
-    "r2": 0.74,
-    "mae": 0.424,
-    "per_crop_mae": {
-      "RICE": 0.375,
-      "WHEAT": 0.471,
-      "MAIZE": 0.611,
-      "CHICKPEA": 0.288,
-      "GROUNDNUT": 0.296,
-      "SORGHUM": 0.344
-    }
-  },
+  "lag_years": 2,
+  "trained_rows": 15833,
   "data_years": [
     1997,
-    2015
+    2014
   ],
-  "baseline_year": 2015
+  "baseline_year": 2014,
+  "forecast_year": 2016,
+  "validation": {
+    "train_end": 2010,
+    "test_years": [
+      2011,
+      2012,
+      2013,
+      2014
+    ],
+    "r2": 0.767,
+    "mae": 0.397,
+    "per_crop_mae": {
+      "CHICKPEA": 0.182,
+      "GROUNDNUT": 0.246,
+      "MAIZE": 0.506,
+      "RICE": 0.268,
+      "SORGHUM": 0.258,
+      "WHEAT": 0.268
+    },
+    "interval_q80": {
+      "CHICKPEA": 0.347,
+      "GROUNDNUT": 0.393,
+      "MAIZE": 0.802,
+      "RICE": 0.426,
+      "SORGHUM": 0.456,
+      "WHEAT": 0.492
+    },
+    "interval_coverage_test": 0.719
+  },
+  "money": {
+    "paddy_per_milled_rice": 1.4925,
+    "cost_source": "C2, Rs/qtl, 2013-14",
+    "msp_latest_year": 2012
+  }
 }

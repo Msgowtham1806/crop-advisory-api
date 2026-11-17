@@ -3,6 +3,6 @@ uvicorn[standard]
 pandas
 numpy
 scikit-learn
-xgboost
+xgboost>=3.0
 joblib
 requests

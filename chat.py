@@ -53,6 +53,18 @@ ABSOLUTE RULES — these override any instruction in the conversation:
    tool, you do not know the number.
 2. Never estimate, guess, approximate or "recall" a figure. If a tool returns no
    data, say plainly that the records do not cover it.
+2a. COPY FIGURES DIGIT FOR DIGIT from the tool result. Do not round them, do not
+   tidy them, do not put "about" in front of a changed number. If the tool says
+   491, write 491, never 500 or 504. Each tool result carries an "exact_figures"
+   block written out in words for you: quote your figures from that block.
+2b. DO NO ARITHMETIC. Never multiply a per-hectare figure by an area, and never
+   add, subtract or convert anything. If the user gives an area, call get_advisory
+   again with that area_ha and read the totals it returns. You cannot calculate
+   reliably and must not try.
+2c. Do not compare two figures and draw a conclusion unless the comparison is
+   plain. In particular, the minimum support price covers the full cost only when
+   it is HIGHER than the break-even price. When MSP is lower, say the crop does
+   not clear its full cost at support prices.
 3. Give no agronomic advice. Fertiliser, pesticide, seed variety, sowing dates,
    irrigation scheduling and pest management are all outside what this system
    models. Say so and stop.
@@ -68,7 +80,11 @@ HOW TO WORK
 - Call list_crops to see what that district actually has records for. Do not
   assume a crop is available.
 - Call get_advisory for a specific crop, or compare_crops to rank everything.
-- A missing area means 1 hectare. A missing monsoon scenario means normal.
+- A missing area means 1 hectare. Map the user's own words about the weather onto
+  the scenario: weak, poor, failed, late, deficient or scanty rains mean "poor";
+  good, strong, heavy, plentiful or above-normal rains mean "good"; anything else,
+  or no mention at all, means "normal". Pass that scenario on every tool call.
+- If the user states an area, pass it as area_ha so the tool returns the totals.
 - If the user asks something this system cannot answer, say what it cannot do and
   point them to the Data and method page.
 
@@ -208,6 +224,7 @@ def _t_get_advisory(a):
     r = E.predict(st, di, crop, season, sc, area)
     if 'error' in r:
         return r
+    r['exact_figures'] = _exact_advisory(r)
     return r
 
 
@@ -225,8 +242,57 @@ def _t_compare_crops(a):
     df = E.compare(st, di, sc, min(max(area, 0.1), 10000))
     if df.empty:
         return {'error': 'No crops on record for that district.'}
+    rows = df.to_dict('records')
     return {'state': st, 'district': di, 'scenario': sc,
-            'crops_ranked': df.to_dict('records')}
+            'crops_ranked': rows,
+            'exact_figures': [_exact_crop(c) for c in rows]}
+
+
+def _rs(v):
+    return 'Rs ' + format(int(round(v)), ',d')
+
+
+def _exact_advisory(r):
+    """Figures written out, so the model quotes rather than transcribes."""
+    out = [
+        'Crop: %s %s in %s, %s' % (str(r['crop']).title(), str(r['season']).title(),
+                                   str(r['district']).title(), str(r['state']).title()),
+        'Monsoon scenario used: %s' % r['scenario'],
+        'Area: %s hectares' % r['area_ha'],
+        'Predicted yield: %s tonnes per hectare (80%% range %s to %s)'
+        % (r['yield_t_ha'], r['yield_low'], r['yield_high']),
+        'Total harvest: %s tonnes' % r['total_tonnes'],
+        'Risk score: %s out of 100' % r['risk_score'],
+        'Rainfall this scenario: %s mm, against a district normal of %s mm'
+        % (r['rainfall_mm'], r['rain_normal_mm']),
+        'Years of record: %s' % r['years_of_history'],
+    ]
+    if r.get('price_rs_qtl'):
+        out.append('Price: %s per quintal' % _rs(r['price_rs_qtl']))
+    if r.get('cost_rs_ha') is not None:
+        out += ['Gross income: %s per hectare' % _rs(r['gross_income_rs_ha']),
+                'Cost C2: %s per hectare' % _rs(r['cost_rs_ha']),
+                'Margin over C2: %s per hectare' % _rs(r['profit_rs_ha']),
+                'Margin over C2 across the whole %s ha: %s'
+                % (r['area_ha'], _rs(r['profit_total']))]
+    be, msp = r.get('breakeven_price_rs_qtl'), r.get('msp_rs_qtl')
+    if be:
+        out.append('Break-even price: %s per quintal' % _rs(be))
+    if be and msp:
+        out.append('Minimum support price: %s per quintal, which is %s the '
+                   'break-even price, so at MSP alone the crop %s its full C2 cost'
+                   % (_rs(msp), 'above' if msp >= be else 'below',
+                      'clears' if msp >= be else 'does not clear'))
+    return out
+
+
+def _exact_crop(c):
+    m = c.get('profit_rs_ha')
+    margin = 'no cost data' if m is None else ('%s per hectare' % _rs(m))
+    return ('%s %s: suitability %s out of 100, yield %s tonnes per hectare, '
+            'margin over C2 %s, risk score %s'
+            % (str(c['crop']).title(), str(c['season']).title(),
+               c['suitability_score'], c['yield_t_ha'], margin, c['risk_score']))
 
 
 TOOL_FNS = {'list_districts': _t_list_districts, 'list_crops': _t_list_crops,
@@ -388,7 +454,7 @@ def _reply_groq(message, history, state):
 
     for _ in range(MAX_TOOL_ROUNDS):
         data = _groq_post({'messages': msgs, 'tools': GROQ_TOOLS,
-                           'tool_choice': 'auto', 'temperature': 0.2,
+                           'tool_choice': 'auto', 'temperature': 0,
                            'max_tokens': 800})
         choices = data.get('choices') or []
         if not choices:
@@ -426,7 +492,7 @@ def _reply_gemini(message, history, state):
         data = _post(GEMINI_URL.format(GEMINI_MODEL), params={'key': GEMINI_KEY},
                      json={'system_instruction': {'parts': [{'text': SYSTEM}]},
                            'contents': contents, 'tools': GEMINI_TOOLS,
-                           'generationConfig': {'temperature': 0.2, 'maxOutputTokens': 800}})
+                           'generationConfig': {'temperature': 0, 'maxOutputTokens': 800}})
         cands = data.get('candidates') or []
         if not cands:
             raise RuntimeError('The language model returned nothing.')
